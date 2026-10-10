@@ -11,6 +11,12 @@ __pycache__/
 venv/
 .pytest_cache/
 
+# 生成的 gRPC 代码：Python 侧由 protoc 在镜像构建期/CI 里现生成，不入库。
+# 注意 Go 侧的 customer-service-go/agentpb/*.pb.go 是**刻意提交**的——Go 构建不调用
+# protoc，缺了它就无法编译（见 Makefile 的 proto 目标生成一次即入库）。两者策略不同，
+# 别顺手把 Go 生成物也一起忽略掉。
+agent-service/proto/agentpb/*_pb2*.py
+
 # 编辑器 / 系统
 .idea/
 .vscode/
