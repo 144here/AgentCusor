@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package agentpb;
+
+option go_package = "github.com/customer-service/agentpb";
+
+service AgentService {
+  // 流式返回：先若干条 delta，最后一条必定是 final
+  rpc ProcessChat (ChatRequest) returns (stream ChatEvent) {}
+}
+
+message ChatRequest {
+  string user_id = 1;
+  string message = 2;
+  repeated Message history = 3;  // 会话历史（真源在 Go 侧）
+}
+
+message Message {
+  string role = 1;  // "user" or "assistant"
+  string content = 2;
+}
+
+message ChatEvent {
+  oneof event {
+    string delta = 1;        // 增量文本片段
+    ChatResponse final = 2;  // 结束汇总
+  }
+}
+
+message ChatResponse {
+  string response = 1;
+  string intent = 2;
+  repeated ToolCall tool_calls = 3;
+  bool requires_escalation = 4;
+}
+
+message ToolCall {
+  string tool_name = 1;
+  string parameters = 2;  // JSON string
+}
