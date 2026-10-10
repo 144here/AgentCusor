@@ -1,0 +1,78 @@
+name: CI
+
+# 目标：把 README 里「已验证的行为 / 变异检查」从人肉陈述变成机器断言。
+# 这里用**原生工具链**跑同一批检查（快、标准）；根目录 Makefile 的目标是同一批检查的
+# docker 版本，留给「宿主零安装」的开发场景。两者并存，不是二选一。
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contract-and-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 跨语言契约：job:events 频道名在 Go 与 Python 各写一份，改一边不报错、只静默失效。
+      # 脚本是 POSIX sh，原生跑即可（make check-contract 只是把它包进 docker）。
+      - name: Contract check (Go <-> Python)
+        run: sh scripts/check_contract.sh
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: customer-service-go/go.sum
+
+      - name: Build, vet and test (Go)
+        working-directory: customer-service-go
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+  python-tests:
+    runs-on: ubuntu-latest
+    services:
+      # test_refund_idempotency.py 要连真 Redis（去重锁 / 结果键 / pubsub）。
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: agent-service/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r agent-service/requirements.txt
+
+      # 仓库里没有 agentpb 的生成代码（Docker 构建期才生成），而 test_stream_invariant.py
+      # 会 import agent_service -> import agentpb.agent_pb2。这两步与
+      # agent-service/Dockerfile.python 的 builder 阶段保持一致；漂移时测试会 import 失败、
+      # CI 直接红，不会静默。
+      - name: Generate Python gRPC code
+        run: |
+          python -m grpc_tools.protoc -I agent-service/proto \
+            --python_out=agent-service/proto/agentpb \
+            --grpc_python_out=agent-service/proto/agentpb \
+            agent-service/proto/agent.proto
+          sed -i 's/^import agent_pb2/from . import agent_pb2/' agent-service/proto/agentpb/agent_pb2_grpc.py
+
+      - name: Run unit tests
+        working-directory: agent-service
+        env:
+          # config.py 默认 REDIS_HOST=redis（容器网络里的名字），CI 里 redis 在 localhost。
+          REDIS_HOST: localhost
+          REDIS_PORT: '6379'
+          REDIS_DB: '0'
+        run: python -m unittest discover -s tests -t tests -v
