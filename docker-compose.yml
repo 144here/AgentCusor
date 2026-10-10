@@ -1,0 +1,95 @@
+
+services:
+  # Python Agent gRPC服务
+  agent-grpc:
+    build:
+      context: ./agent-service
+      dockerfile: Dockerfile.python
+    # 固定 tag：celery-worker 复用同一个镜像（源码、依赖完全一致，只是 command 不同），
+    # 不给 worker 单独的 build，避免多出一个 457MB 的镜像。
+    image: agentcusor-agent-grpc:latest
+    ports:
+      - "50051:50051"
+      - "8001:8001"   # Prometheus 指标端口（prometheus.yml 抓的是容器网络里的 8001）
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # base_url 的兜底必须非空：openai SDK 见到空字符串会当作有效地址，
+      # 请求会直接发到 ""。指向兼容端点时由外部环境变量覆盖。
+      # 兜底值必须与下面 LLM_MODEL 的兜底值**配成一对**：原先这里兜底到 api.openai.com、
+      # 而模型兜底 deepseek-flash，两者合起来 100% 404（该模型在那个端点不存在）。
+      # 更糟的是它不阻塞启动——5 个服务照样 Up、/health 照样 ok，只有真的发一条消息
+      # 才会收到 {"type":"error",...}，属于本项目一直在防的「启动看着健康、功能静默失效」。
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.deepseek.com}
+      # 默认值取实测可用的后端：.env 里那把 OpenAI key 已无额度，
+      # 唯一能通的是 DeepSeek（见 README/交接说明）。换官方 OpenAI 时覆盖此变量。
+      # deepseek-flash 是网关的规范名，deepseek-chat 之类只是别名。
+      - LLM_MODEL=${LLM_MODEL:-deepseek-flash}
+      # flash/pro 默认带思维链；关掉它，否则内部推理会被透传给终端用户，
+      # 并破坏「delta 拼接 == final.response」的不变式。网关不接受这个字段时设为 false。
+      - LLM_DISABLE_THINKING=${LLM_DISABLE_THINKING:-true}
+      - REDIS_HOST=redis
+      # 业务键（ticket:*/job:*）所在的库号。三处服务都从这同一个变量取值，
+      # 只给一边改库号不会报错，只会静默收不到任务事件——所以不允许各写各的常量。
+      - REDIS_DB=${REDIS_DB:-0}
+      - METRICS_PORT=8001
+      - ENABLE_REFUND_QUEUE=${ENABLE_REFUND_QUEUE:-true}
+    depends_on:
+      - redis
+    command: python agent_service.py
+
+  # 退款工单的异步 worker。用 agent-grpc 的同一个镜像，只是 command 不同——
+  # 队列只承载副作用（建工单/邮件/通知），聊天本身仍走 agent-grpc 的同步流式。
+  celery-worker:
+    image: agentcusor-agent-grpc:latest
+    environment:
+      - REDIS_HOST=redis
+      # 业务键（ticket:*/job:*）与 PUBLISH 用的库号，必须与 agent-grpc、websocket-server 一致。
+      - REDIS_DB=${REDIS_DB:-0}
+      # broker 与 backend 分库：任务报文（1）和任务结果（2）不和业务键（0：ticket:*/job:*）混在一起。
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/1}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+    depends_on:
+      - redis
+      - agent-grpc
+    command: celery -A tasks.celery_app:app worker --loglevel=INFO --concurrency=2
+
+  # Go WebSocket服务器
+  websocket-server:
+    build:
+      context: ./customer-service-go
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - GRPC_AGENT_ADDR=agent-grpc:50051
+      - REDIS_ADDR=redis:6379
+      # 必须与 agent-grpc / celery-worker 的 REDIS_DB 相同，否则订阅不到 job:events——
+      # 不报错，只是永远收不到任务事件。
+      - REDIS_DB=${REDIS_DB:-0}
+      - HTTP_PORT=8000
+    depends_on:
+      - agent-grpc
+      - redis
+    command: ./customer-service
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  # Prometheus监控
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+
+volumes:
+  redis_data:

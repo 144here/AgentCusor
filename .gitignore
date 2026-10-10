@@ -1,0 +1,21 @@
+# 凭据。这个仓库曾经因为一个 .pyc 把可用的 key 打进镜像，凭据类的文件一律不提交。
+.env
+.env.*
+
+# Python 字节码与虚拟环境。
+# __pycache__ 不只是噪音：它正是上次镜像泄密的载体——一个 config.cpython-311.pyc
+# 里带着明文 key 进了镜像层，而运行中的容器里 grep 不到它。
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# 本地工具权限/日志：只该留在本机，入库会带出本机路径与临时授权。
+.claude/settings.local.json
+*.log
