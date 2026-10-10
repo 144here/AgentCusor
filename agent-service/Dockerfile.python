@@ -1,0 +1,66 @@
+# Stage 1: build wheels + generate proto code
+FROM python:3.11-slim AS builder
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=off \
+    PIP_DISABLE_PIP_VERSION_CHECK=on
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential gcc curl ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /wheels
+
+COPY requirements.txt .
+
+RUN python -m pip install --upgrade pip wheel setuptools \
+    && pip wheel --wheel-dir=/wheels -r requirements.txt
+
+# ---- 生成 proto 代码 ----
+COPY proto /src/proto
+WORKDIR /src
+RUN python -m pip install --no-index --find-links=/wheels grpcio-tools \
+    && mkdir -p /src/proto/agentpb \
+    && python -m grpc_tools.protoc \
+    -I./proto \
+    --python_out=./proto/agentpb \
+    --grpc_python_out=./proto/agentpb \
+    ./proto/agent.proto \
+    && sed -i 's/^import agent_pb2/from . import agent_pb2/' /src/proto/agentpb/agent_pb2_grpc.py \
+    && echo "===== 检查 sed 结果 =====" \
+    && grep "import agent_pb2" /src/proto/agentpb/agent_pb2_grpc.py
+
+# Stage 2: final image
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    HOME=/app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --shell /bin/bash appuser
+
+WORKDIR /app
+
+COPY --from=builder /wheels /wheels
+COPY requirements.txt .
+
+RUN python -m pip install --upgrade pip \
+    && pip install --no-index --find-links=/wheels -r requirements.txt \
+    && rm -rf /wheels
+
+# 复制应用源码
+COPY . .
+
+# 用 builder 阶段生成的 proto 代码覆盖进去
+COPY --from=builder /src/proto/agentpb /app/proto/agentpb
+
+RUN chown -R appuser:appuser /app
+
+USER appuser
+
+EXPOSE 50051
+
+CMD ["python", "agent_service.py"]

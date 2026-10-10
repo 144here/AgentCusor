@@ -1,0 +1,9 @@
+grpcio==1.71.2
+grpcio-tools==1.71.2
+autogen-agentchat==0.7.5
+autogen-ext[openai]==0.7.5
+redis>=5.0.0
+celery[redis]>=5.3
+structlog>=22.3
+prometheus_client>=0.16
+requests>=2.28
